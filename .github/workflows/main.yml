@@ -21,6 +21,24 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.7"
+      - name: Patch game for Android voice
+        run: |
+          python3 - <<'PY'
+          s = open("game.html", encoding="utf-8").read()
+          R = [
+            ('function vox(txt,who){if(!vz||mute)return;try{const ss=window.speechSynthesis;',
+             'function vox(txt,who){if(!vz||mute)return;try{if(window.AndroidTTS){const nw=performance.now();if(who==="h"&&(nw-vl<1500||AndroidTTS.speaking()))return;vl=nw;AndroidTTS.speak(txt,who==="g"?.6:1.2,who==="g"?1.1:1.15,who==="g");return}const ss=window.speechSynthesis;'),
+            ('const ch=e.k||e.al>0,sp=',
+             'if(e.k===0&&e.al>0){e.sh=(e.sh||0)-dt;if(e.sh<=0){e.sh=3.5;const l2=pk1(GL);vox(l2[0],"g");say("🚨 Охранник: «"+l2[1]+"»")}}const ch=e.k||e.al>0,sp='),
+            ('if(e.al<=0){snd(880,.09,', 'if(e.al<=0){e.sh=3.5;snd(880,.09,'),
+          ]
+          for a, b in R:
+              if a in s and b not in s:
+                  s = s.replace(a, b, 1)
+              else:
+                  print("skip:", a[:40])
+          open("game.html", "w", encoding="utf-8").write(s)
+          PY
       - name: Generate Android project
         run: |
           set -e
@@ -66,6 +84,11 @@ jobs:
           cat > $D/AndroidManifest.xml <<'EOF'
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
             <uses-permission android:name="android.permission.VIBRATE"/>
+            <queries>
+              <intent>
+                <action android:name="android.intent.action.TTS_SERVICE"/>
+              </intent>
+            </queries>
             <application
                 android:label="@string/app_name"
                 android:icon="@mipmap/ic_launcher"
@@ -91,26 +114,63 @@ jobs:
           import android.app.Activity;
           import android.graphics.Color;
           import android.os.Bundle;
+          import android.speech.tts.TextToSpeech;
           import android.view.View;
           import android.view.WindowManager;
+          import android.webkit.JavascriptInterface;
           import android.webkit.WebChromeClient;
           import android.webkit.WebSettings;
           import android.webkit.WebView;
           import android.webkit.WebViewClient;
+          import java.util.Locale;
 
           public class MainActivity extends Activity {
             private WebView web;
+            private TextToSpeech tts;
+            private volatile boolean ttsReady = false;
+
+            public class Bridge {
+              @JavascriptInterface
+              public void speak(String text, float pitch, float rate, boolean flush) {
+                if (!ttsReady || tts == null) return;
+                tts.setPitch(pitch);
+                tts.setSpeechRate(rate);
+                tts.speak(text, flush ? TextToSpeech.QUEUE_FLUSH : TextToSpeech.QUEUE_ADD, null, "v");
+              }
+
+              @JavascriptInterface
+              public boolean speaking() {
+                return ttsReady && tts != null && tts.isSpeaking();
+              }
+
+              @JavascriptInterface
+              public boolean ready() {
+                return ttsReady;
+              }
+
+              @JavascriptInterface
+              public void stop() {
+                if (tts != null) tts.stop();
+              }
+            }
 
             @Override
             protected void onCreate(Bundle b) {
               super.onCreate(b);
               getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+              tts = new TextToSpeech(this, status -> {
+                if (status == TextToSpeech.SUCCESS) {
+                  int r = tts.setLanguage(new Locale("ru", "RU"));
+                  ttsReady = r != TextToSpeech.LANG_MISSING_DATA && r != TextToSpeech.LANG_NOT_SUPPORTED;
+                }
+              });
               web = new WebView(this);
               web.setBackgroundColor(Color.parseColor("#0e1116"));
               WebSettings s = web.getSettings();
               s.setJavaScriptEnabled(true);
               s.setDomStorageEnabled(true);
               s.setMediaPlaybackRequiresUserGesture(false);
+              web.addJavascriptInterface(new Bridge(), "AndroidTTS");
               web.setWebViewClient(new WebViewClient());
               web.setWebChromeClient(new WebChromeClient());
               setContentView(web);
@@ -143,6 +203,15 @@ jobs:
             protected void onResume() {
               super.onResume();
               web.onResume();
+            }
+
+            @Override
+            protected void onDestroy() {
+              if (tts != null) {
+                tts.stop();
+                tts.shutdown();
+              }
+              super.onDestroy();
             }
           }
           EOF
